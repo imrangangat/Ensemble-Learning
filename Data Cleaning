@@ -1,0 +1,145 @@
+#Read Files 
+holiday.events <- read.csv("downloads/holidays_events.csv")
+oil <- read.csv("downloads/oil.csv")
+stores <- read.csv("downloads/stores.csv")
+train <- read.csv("downloads/train.csv")
+transactions <- read.csv("downloads/transactions.csv")
+
+#Load Packages
+library(fpp2)
+library(scales)
+library(tidyverse) 
+library(tidyquant)
+library(gridExtra)
+library(tibbletime)
+library(forecast)
+library(itsmr)
+library(here)
+library(fpp2)
+library(tseries)
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(zoo)
+library(tidyverse)
+library(magrittr)
+library(Metrics)
+library(plotly)
+library(zeallot)
+library(lubridate)
+library(cowplot)
+library(forecast)
+library(ggpubr)
+library(gridExtra)
+library(lmerTest)
+library(nlme)
+library(tidyverse)
+library(rminer)
+library(tsibble)
+library(fable)
+library(base)
+
+#Cleaning
+train['date']<-as.Date(train$date, format='%Y-%m-%d')
+oil['date']<-as.Date(oil$date, format='%Y-%m-%d')
+transactions['date']<-as.Date(transactions$date, format='%Y-%m-%d')
+
+# calculate the median oil price of each month
+oil$year=year(oil$date)
+oil$month=month(oil$date)
+
+med_oil<-oil %>% group_by(year,month) %>%
+  summarise(median_oil_yr_mt=median(dcoilwtico,na.rm=TRUE))
+
+oil <- oil %>% left_join(med_oil, by=c('year','month')) %>% subset(select=-c(year,month))
+
+# calculate the median transaction of each month for each store 
+transactions$year=year(transactions$date)
+transactions$month=month(transactions$date)
+
+med_transactions<-transactions %>% group_by(store_nbr, year,month) %>%
+  summarise(median_transaction_yr_mt=median(transactions,na.rm=TRUE))
+
+transactions <- transactions %>% 
+  left_join(med_transactions, by=c('store_nbr','year','month')) %>% 
+  subset(select=-c(year,month))
+
+raw<-train %>% 
+  left_join(stores, by='store_nbr') %>%
+  left_join(oil,by='date') %>%
+  left_join(transactions,by=c('date','store_nbr')) 
+
+# set factor variables to chacter for table merging
+raw$state=as.character(raw$state)
+raw$city=as.character(raw$city)
+raw$family=as.character(raw$family)
+
+#set  variable
+df=raw
+
+# set back to factors
+df$state=as.factor(df$state)
+df$city=as.factor(df$city)
+df$family=as.factor(df$family)
+df$store_nbr=as.factor(df$store_nbr)
+df$cluster=as.factor(df$cluster)
+
+#set date related variables
+df['date']<-as.Date(df$date, format='%Y-%m-%d')
+
+df$year=year(df$date)
+df$month=month(df$date)
+df$mday=mday(df$date)
+df$wday=wday(df$date)
+df$myear <- format(as.Date(df$date), "%Y-%m")
+df$wyear=strftime(as.character(df$date), format = "%V")
+
+# cleanse outliers. set (+/-)1.5IQR boundary for outliers. 
+df_clean <- df %>% arrange("store_nbr", "family", "date")
+a=df_clean %>% group_by(store_nbr, family) %>%
+  summarise(min=min(sales, na.rm = TRUE), 
+            Q1=quantile(sales, probs = 0.25, na.rm = TRUE),
+            median=median(sales, na.rm = TRUE), 
+            Q3=quantile(sales, probs = 0.75, na.rm = TRUE),
+            max=max(sales, na.rm = TRUE),
+            iqr_h=Q3+1.5*IQR(sales, na.rm = TRUE),
+            iqr_l=ifelse(Q1-1.5*IQR(sales, na.rm = TRUE)<=0,0,Q1-1.5*IQR(sales, na.rm = TRUE))
+  ) %>%
+  ungroup()
+
+df_clean <- df_clean %>% left_join(a, by=c('store_nbr'='store_nbr', 
+                                           'family'='family'))
+
+df_clean <- df_clean %>% 
+  mutate(sales = ifelse(sales>iqr_h,NaN,sales))
+
+# special take_care of O's , implanted mean of weekly sales
+t<-df_clean %>% group_by(store_nbr,family,year,wyear) %>%
+  summarise(mean7=mean(sales, na.rm = TRUE))
+
+df_clean <- df_clean %>% left_join(t, by=c('store_nbr','family','year','wyear'))
+
+df_clean <- df_clean %>% 
+  mutate(sales = ifelse(mean7<0.0001 | is.na(mean7),iqr_l,sales))
+
+mean_transactions=mean(df_clean$transactions, na.rm = TRUE)
+mean_dcoilwtico=mean(df_clean$dcoilwtico, na.rm = TRUE)
+
+t<-df_clean %>% group_by(store_nbr,family,year,month) %>%
+  summarise(median_yr_mt=median(sales, na.rm=TRUE))
+
+df_clean <- df_clean %>% left_join(t, by=c('store_nbr','family','year','month'))
+
+# data cleansing on oil price(dcoilwtico) and transactions
+df_clean <- df_clean %>% 
+  mutate(sales = ifelse(is.na(sales)==TRUE,median_yr_mt,sales),         
+         transactions = ifelse(is.na(transactions)==TRUE | transactions==0,
+                               ifelse(is.na(median_transaction_yr_mt)==T | median_transaction_yr_mt==0, 
+                                      mean_transactions,
+                                      median_transaction_yr_mt) , transactions),
+         dcoilwtico = ifelse(is.na(dcoilwtico)==TRUE | dcoilwtico==0,
+                             ifelse(is.na(median_oil_yr_mt)==T | median_oil_yr_mt==0, 
+                                    mean_dcoilwtico,
+                                    median_oil_yr_mt) , dcoilwtico)
+  )
+  
